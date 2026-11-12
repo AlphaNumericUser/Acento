@@ -2,6 +2,15 @@
 
 A macOS dictation app with local speech models and optional bring-your-own-key cloud transcription. Built with SwiftUI for macOS 26 or later.
 
+<p align="center">
+  <img src="Design/Screenshots/home.jpg" alt="Acento home with dictation history" width="720">
+</p>
+
+<p align="center">
+  <img src="Design/Screenshots/transcription.jpg" alt="Choosing a transcription model" width="49%">
+  <img src="Design/Screenshots/settings.jpg" alt="Acento settings" width="49%">
+</p>
+
 ## Get started
 
 Open `Acento.xcodeproj` in Xcode and run the `Acento` scheme. In **Transcription → On your Mac**, download a Parakeet or Whisper model, or select Apple Dictation without a separate download if macOS already supports on-device recognition for your language. Then use **Start dictation** or the shortcut configured in **Settings**. The transcript appears in **Home** and is inserted into the previously focused application when macOS Accessibility permission is granted. Otherwise it is copied to the clipboard.
