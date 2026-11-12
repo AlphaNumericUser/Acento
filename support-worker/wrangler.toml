@@ -1,0 +1,11 @@
+name = "acento-support"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Secrets (never committed): RESEND_API_KEY and SUPPORT_EMAIL.
+# Set them with `npx wrangler secret put <NAME>`.
+
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+simple = { limit = 3, period = 60 }

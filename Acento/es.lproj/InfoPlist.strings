@@ -1,0 +1,2 @@
+"NSMicrophoneUsageDescription" = "Permite el acceso al micrófono para grabar tus dictados.";
+"NSSpeechRecognitionUsageDescription" = "Transcribe tu voz en este Mac con el reconocimiento de voz integrado de Apple.";
