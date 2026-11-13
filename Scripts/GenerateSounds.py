@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Synthesizes the app's original UI sounds (no samples) into `Acento/Sounds`.
 
-Designed with AI assistance (Claude), using Wispr Flow's interface sounds only as a
-stylistic reference; every sound here is generated from scratch, with no sampled audio.
+Every sound here is generated from scratch, with no sampled audio.
 
 Style: soft bubble pops for dictation start/stop/lock, and soft pure or
 kalimba-like tones built on perfect fifths for paste, cancel, error, and alert.
