@@ -8,6 +8,11 @@ A macOS dictation app with local speech models and optional bring-your-own-key c
 
 <p align="center">
   <img src="Design/Screenshots/transcription.jpg" alt="Choosing a transcription model" width="49%">
+  <img src="Design/Screenshots/ai-polish.jpg" alt="AI Polish providers" width="49%">
+</p>
+
+<p align="center">
+  <img src="Design/Screenshots/dictionary.jpg" alt="Personal dictionary" width="49%">
   <img src="Design/Screenshots/settings.jpg" alt="Acento settings" width="49%">
 </p>
 
