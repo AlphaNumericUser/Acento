@@ -71,15 +71,16 @@ struct ModelsPage: View {
     }
 
     private func tabButton(_ title: String, value: Int) -> some View {
-        Button { tab = value } label: {
+        Button {
+            withAnimation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.18)) { tab = value }
+        } label: {
             Text(LocalizedStringKey(title))
                 .font(AppFonts.figtree(size: 13, weight: .semibold))
                 .frame(width: 100, height: 33)
                 .background(tab == value ? Color.cardBackground : .clear, in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .buttonStyle(.plain)
-        .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+        .buttonStyle(FlowButtonStyle())
     }
 
     private func modelCard(_ model: SpeechModel) -> some View {
@@ -139,8 +140,7 @@ struct ModelsPage: View {
                 Spacer()
                 if ready {
                     Button(model == .apple ? "Remove from Acento" : "Remove files") { store.remove(model) }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                         .font(AppFonts.figtree(size: 11))
                         .foregroundStyle(Color.inkSecondary)
                 }
@@ -191,8 +191,7 @@ struct ModelsPage: View {
                 Spacer()
                 if ready {
                     Button("Change settings") { editingProvider = model }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                         .font(AppFonts.figtree(size: 11))
                         .foregroundStyle(Color.inkSecondary)
                 }
@@ -350,15 +349,13 @@ private struct APIProviderEditor: View {
             HStack {
                 if hasKey {
                     Button("Remove key") { removeKey() }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                         .font(AppFonts.figtree(size: 12))
                         .foregroundStyle(Color.errorText)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .buttonStyle(FlowButtonStyle())
                 Button { save() } label: {
                     Text(LocalizedStringKey(hasChanges || isActive ? "Save and use" : "Use provider"))
                         .font(AppFonts.figtree(size: 12, weight: .semibold))
@@ -368,9 +365,8 @@ private struct APIProviderEditor: View {
                         .background(canSave ? Color.inkPrimary : Color.disabledBackground, in: RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlowButtonStyle(enabled: canSave))
                 .disabled(!canSave)
-                .onHover { ($0 && canSave ? NSCursor.pointingHand : NSCursor.arrow).set() }
             }
         }
         .padding(28)

@@ -129,9 +129,8 @@ struct HelpPage: View {
                         .background(canSend ? Color.inkPrimary : Color.disabledBackground, in: RoundedRectangle(cornerRadius: 7))
                         .contentShape(RoundedRectangle(cornerRadius: 7))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlowButtonStyle(enabled: canSend))
                 .disabled(!canSend)
-                .pointerCursor(canSend)
             }
         }
     }

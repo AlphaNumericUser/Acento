@@ -110,6 +110,7 @@ struct FlowBarView: View {
     @ObservedObject var recorder: DictationController
     @AppStorage("appLanguage") private var language = "es"
     @AppStorage("shortcutLabel") private var shortcut = "Right Command"
+    @AppStorage("showBar") private var showBar = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var undoHovered = false
     @State private var tooltipVisible = false
@@ -157,9 +158,9 @@ struct FlowBarView: View {
                     .allowsHitTesting(false)
             }
             .frame(height: 28, alignment: .bottom)
-            .opacity(recorder.phase == .idle && !recorder.cancellationVisible && recorder.notice == nil ? 1 : 0)
-            .allowsHitTesting(recorder.phase == .idle)
-            .accessibilityHidden(!idleHover)
+            .opacity(showBar && recorder.phase == .idle && !recorder.cancellationVisible && recorder.notice == nil ? 1 : 0)
+            .allowsHitTesting(showBar && recorder.phase == .idle)
+            .accessibilityHidden(!showBar || !idleHover)
 
             HStack(spacing: 8) {
                 switch recorder.phase {

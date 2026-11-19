@@ -11,9 +11,10 @@ private enum SettingsEditor: String, Identifiable {
 
 struct FlowSwitchStyle: ToggleStyle {
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                 configuration.isOn.toggle()
             }
         } label: {
@@ -27,9 +28,9 @@ struct FlowSwitchStyle: ToggleStyle {
                         .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
                         .offset(x: configuration.isOn ? 10 : -10)
                 }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: configuration.isOn)
         }
-        .buttonStyle(.plain)
-        .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+        .buttonStyle(FlowButtonStyle())
         .accessibilityLabel(L10n.text(configuration.isOn ? "On" : "Off", locale: locale))
     }
 }
@@ -217,8 +218,7 @@ struct SettingsPage: View {
             HStack {
                 Spacer()
                 Button("Cancel") { activeEditor = nil }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .buttonStyle(FlowButtonStyle())
                 Button { saveShortcutEditor() } label: {
                     Text("Save")
                         .font(AppFonts.figtree(size: 12, weight: .semibold))
@@ -228,8 +228,7 @@ struct SettingsPage: View {
                         .background(Color.inkPrimary, in: RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
-                .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+                .buttonStyle(FlowButtonStyle())
             }
         }
         .padding(28)
@@ -314,8 +313,7 @@ struct SettingsPage: View {
                         .frame(minHeight: 52)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+                    .buttonStyle(FlowButtonStyle(pressScale: 0.99))
                 }
             }
             .padding(.horizontal, 16)
@@ -377,8 +375,7 @@ struct SettingsPage: View {
                 .background(Color.buttonBackground, in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-            .buttonStyle(.plain)
-            .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+            .buttonStyle(FlowButtonStyle())
     }
 
     private func microphoneOption(_ name: String, id: String) -> some View {
@@ -395,8 +392,7 @@ struct SettingsPage: View {
             .frame(minHeight: 52)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+        .buttonStyle(FlowButtonStyle(pressScale: 0.99))
     }
 }
 

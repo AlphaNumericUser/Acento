@@ -14,13 +14,11 @@ struct FlowModalCloseButton: View {
                 .frame(width: 30, height: 30)
                 .background(hovering ? Color.hoverBackground : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(Rectangle())
+                .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.16), value: hovering)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FlowButtonStyle())
         .keyboardShortcut(.cancelAction)
-        .onHover { inside in
-            hovering = inside
-            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-        }
+        .onHover { hovering = $0 }
         .help(L10n.text("Close", locale: locale))
         .accessibilityLabel(L10n.text("Close", locale: locale))
     }
@@ -102,12 +100,11 @@ struct FlowMenuPicker<Item: Hashable>: View {
             .background(hovering || open ? Color.hoverBackground : Color.cardBackground, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(open ? Color.inkFaint : Color.cardBorder))
             .contentShape(RoundedRectangle(cornerRadius: 8))
+            .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.16), value: hovering)
+            .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.16), value: open)
         }
-        .buttonStyle(.plain)
-        .onHover { inside in
-            hovering = inside
-            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-        }
+        .buttonStyle(FlowButtonStyle())
+        .onHover { hovering = $0 }
         .background(FlowMenuAnchor(controller: menu))
         .onDisappear { menu.close() }
         .accessibilityLabel(L10n.text(title, locale: locale))
@@ -328,12 +325,10 @@ private struct FlowSegment: View {
                     }
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 7))
+                .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.16), value: hovering)
         }
-        .buttonStyle(.plain)
-        .onHover { inside in
-            hovering = inside
-            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-        }
+        .buttonStyle(FlowButtonStyle())
+        .onHover { hovering = $0 }
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -345,17 +340,94 @@ struct FlowMenuRowStyle: ButtonStyle {
         configuration.label
             .background(configuration.isPressed ? Color.cardBorder : hovering ? Color.hoverBackground : .clear,
                         in: RoundedRectangle(cornerRadius: 6))
-            .onHover { inside in
-                hovering = inside
-                (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.15), value: hovering)
+            .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.12), value: configuration.isPressed)
+            .onHover { hovering = $0 }
+            .pointerCursor()
+    }
+}
+
+/// Smooth hover and press feedback shared across buttons in the app.
+struct FlowButtonStyle: ButtonStyle {
+    var enabled = true
+    var pressScale: CGFloat = 0.97
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed && enabled
+        configuration.label
+            .scaleEffect(reduceMotion ? 1 : (pressed ? pressScale : (hovering && enabled ? 1.012 : 1)))
+            .brightness(hovering && enabled ? (pressed ? -0.02 : 0.03) : 0)
+            .opacity(pressed ? 0.9 : 1)
+            .animation(reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.18), value: hovering)
+            .animation(reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.12), value: pressed)
+            .onHover { hovering = $0 }
+            .pointerCursor(enabled)
+    }
+}
+
+/// AppKit tracking-area cursor view that sets the pointing-hand cursor even inside non-activating floating panels.
+private struct PointerCursorTrackingView: NSViewRepresentable {
+    var enabled: Bool
+
+    func makeNSView(context: Context) -> TrackingNSView {
+        let view = TrackingNSView()
+        view.enabled = enabled
+        return view
+    }
+
+    func updateNSView(_ nsView: TrackingNSView, context: Context) {
+        nsView.enabled = enabled
+    }
+
+    final class TrackingNSView: NSView {
+        var enabled = true {
+            didSet {
+                if oldValue != enabled { window?.invalidateCursorRects(for: self) }
             }
+        }
+        private var area: NSTrackingArea?
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let area { removeTrackingArea(area) }
+            let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeAlways, .inVisibleRect]
+            let newArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
+            addTrackingArea(newArea)
+            area = newArea
+        }
+
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            if enabled { addCursorRect(bounds, cursor: .pointingHand) }
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            (enabled ? NSCursor.pointingHand : NSCursor.arrow).set()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            if enabled { NSCursor.pointingHand.set() }
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            if enabled { NSCursor.pointingHand.set() }
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            NSCursor.arrow.set()
+        }
     }
 }
 
 extension View {
-    /// Shows the pointing-hand cursor while hovering an enabled control.
+    /// Shows the pointing-hand cursor while hovering an enabled control, including floating panels.
     func pointerCursor(_ enabled: Bool = true) -> some View {
-        onHover { ($0 && enabled ? NSCursor.pointingHand : NSCursor.arrow).set() }
+        background(PointerCursorTrackingView(enabled: enabled))
+            .pointerStyle(enabled ? .link : .default)
+            .onHover { ($0 && enabled ? NSCursor.pointingHand : NSCursor.arrow).set() }
     }
 }
 

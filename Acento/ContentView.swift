@@ -162,12 +162,11 @@ private struct SidebarButton: View {
             .background(selected ? Color.hoverBackground : hovering ? Color.hoverBackground.opacity(0.55) : .clear,
                         in: RoundedRectangle(cornerRadius: 7))
             .contentShape(Rectangle())
+            .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.16), value: hovering)
+            .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.18), value: selected)
         }
-        .buttonStyle(.plain)
-        .onHover { inside in
-            hovering = inside
-            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-        }
+        .buttonStyle(FlowButtonStyle(pressScale: 0.98))
+        .onHover { hovering = $0 }
     }
 }
 
@@ -293,9 +292,8 @@ struct DictationPage: View {
                         .foregroundStyle(Color.onAccent)
                         .background(Color.inkPrimary, in: RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlowButtonStyle(enabled: !recorder.phase.isProcessing))
                 .disabled(recorder.phase.isProcessing)
-                .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
             }
             if showModelsOnHome {
                 Rectangle().fill(Color.cardBorder).frame(height: 1)
@@ -350,8 +348,7 @@ struct DictationPage: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
+        .buttonStyle(FlowButtonStyle())
     }
 
     private func metric(_ value: String, _ label: String) -> some View {
@@ -429,11 +426,8 @@ private struct DeletionNotice: View {
                     .background(Color(white: undoHovered ? 0.2 : 0.14), in: RoundedRectangle(cornerRadius: 9))
                     .animation(.easeOut(duration: 0.12), value: undoHovered)
             }
-            .buttonStyle(.plain)
-            .onHover { inside in
-                undoHovered = inside
-                (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-            }
+            .buttonStyle(FlowButtonStyle())
+            .onHover { undoHovered = $0 }
         }
         .padding(.leading, 16)
         .padding(.trailing, 12)

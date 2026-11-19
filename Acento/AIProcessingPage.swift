@@ -161,10 +161,9 @@ struct AIProcessingPage: View {
         Button(LocalizedStringKey(template.isBuiltIn ? "View" : "Edit")) {
             editingTemplate = AIPromptTemplateDraft(id: template.id, name: template.displayName(locale: locale), prompt: template.prompt, isNew: false, isReadOnly: template.isBuiltIn)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FlowButtonStyle())
         .font(AppFonts.figtree(size: 11))
         .foregroundStyle(Color.inkSecondary)
-        .pointerCursor()
     }
 
     private func providerCard(_ provider: AITextProvider) -> some View {
@@ -202,8 +201,7 @@ struct AIProcessingPage: View {
                 Spacer()
                 if hasKey {
                     Button("Change settings") { editingProvider = provider }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                         .font(AppFonts.figtree(size: 11))
                         .foregroundStyle(Color.inkSecondary)
                 }
@@ -397,15 +395,13 @@ private struct AITextProviderEditor: View {
             HStack {
                 if hasKey {
                     Button("Remove key", action: removeKey)
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                         .font(AppFonts.figtree(size: 12))
                         .foregroundStyle(Color.errorText)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .buttonStyle(FlowButtonStyle())
                 Button(action: save) {
                     Text(LocalizedStringKey(hasChanges || isActive ? "Save and use" : "Use provider"))
                         .font(AppFonts.figtree(size: 12, weight: .semibold))
@@ -415,9 +411,8 @@ private struct AITextProviderEditor: View {
                         .background(canSave ? Color.inkPrimary : Color.disabledBackground, in: RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlowButtonStyle(enabled: canSave))
                 .disabled(!canSave)
-                .onHover { ($0 && canSave ? NSCursor.pointingHand : NSCursor.arrow).set() }
             }
         }
         .padding(28)
@@ -572,22 +567,19 @@ private struct AIPromptTemplateEditor: View {
                             .background(Color.inkPrimary, in: RoundedRectangle(cornerRadius: 8))
                             .contentShape(RoundedRectangle(cornerRadius: 8))
                     }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .buttonStyle(FlowButtonStyle())
                 }
             } else {
             HStack {
                 if !draft.isNew {
                     Button("Delete template", action: delete)
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                         .font(AppFonts.figtree(size: 12))
                         .foregroundStyle(Color.errorText)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .buttonStyle(FlowButtonStyle())
                 Button(action: save) {
                     Text("Save and use")
                         .font(AppFonts.figtree(size: 12, weight: .semibold))
@@ -597,9 +589,8 @@ private struct AIPromptTemplateEditor: View {
                         .background(canSave ? Color.inkPrimary : Color.disabledBackground, in: RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlowButtonStyle(enabled: canSave))
                 .disabled(!canSave)
-                .onHover { ($0 && canSave ? NSCursor.pointingHand : NSCursor.arrow).set() }
             }
             }
         }

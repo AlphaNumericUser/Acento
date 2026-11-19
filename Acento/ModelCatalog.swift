@@ -241,7 +241,13 @@ final class SpeechModelStore: ObservableObject {
     }
 
     private static let appleReleasedKey = "appleSpeechReleased"
+    /// Set once the Apple model was installed for Acento; survives restarts so a slow or transient
+    /// AssetInventory answer at launch never asks the user to pick a model again.
+    private static let appleInstalledKey = "appleSpeechInstalled"
+    private static let installedCacheKey = "installedSpeechModels"
     private static let offlineFallbackKey = "offlineLocalFallback"
+    private var appleRestoreAttempted = false
+    private var refreshRetries = 0
 
     /// Without internet, an API model hands the recording to an installed local model so the text still gets pasted.
     @Published var offlineFallbackEnabled: Bool {
@@ -251,7 +257,29 @@ final class SpeechModelStore: ObservableObject {
     init() {
         selectedID = UserDefaults.standard.string(forKey: "selectedSpeechModel")
         offlineFallbackEnabled = UserDefaults.standard.object(forKey: Self.offlineFallbackKey) as? Bool ?? true
+        // Start from the last known state so a dictation right after launch never waits for the async check.
+        installed = Self.cachedInstalled()
         refresh()
+    }
+
+    /// Last known installed models, trusting only what can be re-checked synchronously.
+    private static func cachedInstalled() -> Set<String> {
+        let defaults = UserDefaults.standard
+        var cached = Set(defaults.stringArray(forKey: installedCacheKey) ?? [])
+        if appleWasInstalled { cached.insert(SpeechModel.apple.id) }
+        for model in SpeechModel.allCases where !model.isLocal && cached.contains(model.id) {
+            if (CredentialStore.get(model) ?? "").isEmpty { cached.remove(model.id) }
+        }
+        return cached
+    }
+
+    /// The user installed Apple Dictation for Acento and has not removed it. Selecting it also
+    /// counts, so installs made before this flag existed are remembered too.
+    private static var appleWasInstalled: Bool {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: appleReleasedKey) else { return false }
+        return defaults.bool(forKey: appleInstalledKey)
+            || defaults.string(forKey: "selectedSpeechModel") == SpeechModel.apple.id
     }
 
     var selected: SpeechModel? { selectedID.flatMap(SpeechModel.init(rawValue:)) }
@@ -264,8 +292,15 @@ final class SpeechModelStore: ObservableObject {
         Task { await refreshAvailability() }
     }
 
+    /// Called after macOS wakes from sleep so any dropped Apple Speech reservation is restored proactively.
+    func refreshAfterWake() {
+        appleRestoreAttempted = false
+        refresh()
+    }
+
     private func refreshAvailability() async {
         var available = Set<String>()
+        var needsRetry = false
         for model in SpeechModel.allCases {
             if !model.isLocal {
                 if let key = CredentialStore.get(model), !key.isEmpty { available.insert(model.id) }
@@ -281,6 +316,14 @@ final class SpeechModelStore: ObservableObject {
                 appleModelDownloadable = status == .supported || status == .downloading
                 if status == .installed {
                     available.insert(model.id)
+                    UserDefaults.standard.set(true, forKey: Self.appleInstalledKey)
+                } else if Self.appleWasInstalled {
+                    // Installed before but not reported now: after a restart the system can briefly
+                    // answer "supported" or nothing at all. Keep it usable and quietly reserve it again.
+                    available.insert(model.id)
+                    appleModelDownloadable = false
+                    if status == nil { needsRetry = true }
+                    else { restoreAppleReservation() }
                 } else if status == nil, let recognizer = SFSpeechRecognizer(locale: Locale.current),
                           recognizer.supportsOnDeviceRecognition, recognizer.isAvailable {
                     available.insert(model.id)
@@ -295,6 +338,45 @@ final class SpeechModelStore: ObservableObject {
             }
         }
         installed = available
+        UserDefaults.standard.set(Array(available).sorted(), forKey: Self.installedCacheKey)
+        if needsRetry, refreshRetries < 5 {
+            refreshRetries += 1
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                self?.refresh()
+            }
+        } else if !needsRetry {
+            refreshRetries = 0
+        }
+    }
+
+    /// Re-reserves the Apple model in the background. When the files are still on disk this is
+    /// instant; otherwise macOS downloads them again without asking the user to pick a model.
+    private func restoreAppleReservation() {
+        guard !appleRestoreAttempted, !busy.contains(SpeechModel.apple.id) else { return }
+        appleRestoreAttempted = true
+        Task { @MainActor [weak self] in
+            do {
+                try await AppleSpeechAssets.install { _ in }
+            } catch {
+                self?.error = "\(SpeechModel.apple.title): \(error.localizedDescription)"
+            }
+            self?.refresh()
+        }
+    }
+
+    /// Makes sure the Apple model is reserved before transcribing with it.
+    private func ensureAppleReserved() async {
+        guard await AppleSpeechAssets.status() != .installed, Self.appleWasInstalled else { return }
+        try? await AppleSpeechAssets.install { _ in }
+    }
+
+    /// Re-subscribes the `SpeechTranscriber` asset in the background after `SFSpeechRecognizer` runs,
+    /// because `SFSpeechRecognizer` overwrites the app's UAF subscriptions with `hammer`/`assistant`.
+    private func scheduleAppleReservationRestore() {
+        guard Self.appleWasInstalled else { return }
+        appleRestoreAttempted = false
+        restoreAppleReservation()
     }
 
     func download(_ model: SpeechModel) async {
@@ -310,6 +392,7 @@ final class SpeechModelStore: ObservableObject {
                     Task { @MainActor [weak self] in self?.progress[id] = value }
                 }
                 UserDefaults.standard.set(false, forKey: Self.appleReleasedKey)
+                UserDefaults.standard.set(true, forKey: Self.appleInstalledKey)
             } else if model == .parakeetV3 {
                 let id = model.id
                 try await AsrModels.download(version: model.parakeetVersion) { [weak self] value in
@@ -339,6 +422,7 @@ final class SpeechModelStore: ObservableObject {
         guard !busy.contains(model.id), model.isLocal else { return }
         if model == .apple {
             UserDefaults.standard.set(true, forKey: Self.appleReleasedKey)
+            UserDefaults.standard.set(false, forKey: Self.appleInstalledKey)
             installed.remove(model.id)
             if selectedID == model.id { selectedID = nil }
             Task { await AppleSpeechAssets.release(); refresh() }
@@ -362,7 +446,7 @@ final class SpeechModelStore: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func transcribe(_ url: URL, using model: SpeechModel) async throws -> String {
+    func transcribe(_ url: URL, using model: SpeechModel, skipAppleReserve: Bool = false) async throws -> String {
         guard installed.contains(model.id) else { throw SpeechFailure(L10n.format("Install or configure %@ before recording.", model.title)) }
         let text: String
         switch model {
@@ -377,30 +461,15 @@ final class SpeechModelStore: ObservableObject {
             let engine = try await WhisperKit(modelFolder: folder, tokenizerFolder: RecordingStorage.folder("Models"), download: false)
             let segments: [TranscriptionResult] = try await engine.transcribe(audioPath: url.path)
             text = segments.map(\.text).joined(separator: " ")
-        case .apple where await AppleSpeechAssets.status() == .installed:
-            text = try await AppleSpeechAssets.transcribe(url)
         case .apple:
-            guard let recognizer = SFSpeechRecognizer(locale: Locale.current),
-                  recognizer.supportsOnDeviceRecognition, recognizer.isAvailable else {
-                throw SpeechFailure("On-device Apple speech recognition is unavailable for your Mac language. Change the language in macOS or choose another local model.")
+            if !skipAppleReserve {
+                await ensureAppleReserved()
             }
-            let authorization = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-            }
-            guard authorization == .authorized else {
-                throw SpeechFailure("Allow speech recognition in System Settings → Privacy & Security → Speech Recognition.")
-            }
-            let request = SFSpeechURLRecognitionRequest(url: url)
-            request.requiresOnDeviceRecognition = true
-            text = try await withCheckedThrowingContinuation { continuation in
-                let completion = SpeechRecognitionCompletion(continuation)
-                recognizer.recognitionTask(with: request) { result, error in
-                    if let result, result.isFinal {
-                        completion.finish(.success(result.bestTranscription.formattedString))
-                    } else if let error {
-                        completion.finish(.failure(error))
-                    }
-                }
+            if await AppleSpeechAssets.status() == .installed {
+                text = try await transcribeWithApple(url)
+            } else {
+                text = try await Self.legacyAppleTranscription(url)
+                scheduleAppleReservationRestore()
             }
         case .groq, .openRouter, .gemini, .openAI:
             guard let key = CredentialStore.get(model), !key.isEmpty else { throw SpeechFailure(L10n.format("Add an API key for %@.", model.title)) }
@@ -410,5 +479,64 @@ final class SpeechModelStore: ObservableObject {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { throw SpeechFailure("No speech was detected. The recording was kept for retry.") }
         return cleaned
+    }
+
+    /// Uses SpeechAnalyzer on the saved WAV file, resetting cached models if the result is empty or truncated,
+    /// and falls back to on-device SFSpeechRecognizer if SpeechAnalyzer fails on a recording with audible speech.
+    private func transcribeWithApple(_ url: URL) async throws -> String {
+        let hasAudibleSpeech = (try? Data(contentsOf: url)).map { WAVSpeechCheck.evaluate($0) == .speech } ?? true
+        var analyzerError: Error?
+        var best = AppleTranscript.empty
+        do {
+            best = try await AppleSpeechAssets.transcript(url)
+            if best.isComplete { return best.text }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            analyzerError = error
+            await AppleSpeechAssets.resetCachedModels()
+            if let retried = try? await AppleSpeechAssets.transcript(url), retried.isBetter(than: best) {
+                best = retried
+                if best.isComplete { return best.text }
+            }
+        }
+        if hasAudibleSpeech {
+            let legacy = try? await Self.legacyAppleTranscription(url)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            scheduleAppleReservationRestore()
+            if let legacy, !legacy.isEmpty {
+                if best.text.isEmpty || legacy.count > Int(Double(best.text.count) * 1.35) {
+                    return legacy
+                }
+            }
+        }
+        if !best.text.isEmpty { return best.text }
+        if let analyzerError { throw analyzerError }
+        return ""
+    }
+
+    private static func legacyAppleTranscription(_ url: URL) async throws -> String {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale.current),
+              recognizer.supportsOnDeviceRecognition, recognizer.isAvailable else {
+            throw SpeechFailure("On-device Apple speech recognition is unavailable for your Mac language. Change the language in macOS or choose another local model.")
+        }
+        let authorization = await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+        }
+        guard authorization == .authorized else {
+            throw SpeechFailure("Allow speech recognition in System Settings → Privacy & Security → Speech Recognition.")
+        }
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        request.requiresOnDeviceRecognition = true
+        return try await withCheckedThrowingContinuation { continuation in
+            let completion = SpeechRecognitionCompletion(continuation)
+            recognizer.recognitionTask(with: request) { result, error in
+                if let result, result.isFinal {
+                    completion.finish(.success(result.bestTranscription.formattedString))
+                } else if let error {
+                    completion.finish(.failure(error))
+                }
+            }
+        }
     }
 }

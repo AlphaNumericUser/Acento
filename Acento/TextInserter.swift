@@ -24,6 +24,9 @@ struct TextInsertionTarget {
     let element: AXUIElement?
     let window: AXUIElement?
     let terminalSession: AXUIElement?
+    var windowTitle: String? = nil
+    var documentPath: String? = nil
+    var surroundingText: String? = nil
 
     var localizedName: String? { application.localizedName }
 }
@@ -31,12 +34,16 @@ struct TextInsertionTarget {
 @MainActor
 enum TextInserter {
     private static let logger = Logger(subsystem: "com.useacento.acento", category: "TextInsertion")
+    private static var accessibilityPromptedThisLaunch = false
 
     nonisolated private struct FocusSnapshot: @unchecked Sendable {
         // AX handles are immutable references; all queries here run on a worker.
         let element: AXUIElement?
         let window: AXUIElement?
         let terminalSession: AXUIElement?
+        let windowTitle: String?
+        let documentPath: String?
+        let surroundingText: String?
     }
 
     static func captureAsync(application: NSRunningApplication?) async -> TextInsertionTarget? {
@@ -49,20 +56,65 @@ enum TextInserter {
         }.value
         guard !Task.isCancelled else { return nil }
         return TextInsertionTarget(application: application, element: snapshot.element,
-                                   window: snapshot.window, terminalSession: snapshot.terminalSession)
+                                   window: snapshot.window, terminalSession: snapshot.terminalSession,
+                                   windowTitle: snapshot.windowTitle, documentPath: snapshot.documentPath,
+                                   surroundingText: snapshot.surroundingText)
     }
 
     nonisolated private static func captureFocus(pid: pid_t, terminal: Bool) -> FocusSnapshot {
         guard AXIsProcessTrusted() else {
-            return FocusSnapshot(element: nil, window: nil, terminalSession: nil)
+            return FocusSnapshot(element: nil, window: nil, terminalSession: nil,
+                                 windowTitle: nil, documentPath: nil, surroundingText: nil)
         }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
         let focused = focusedElement(of: app, pid: pid)
         let window = elementAttribute(kAXWindowAttribute, of: focused ?? app)
             ?? elementAttribute(kAXFocusedWindowAttribute, of: app)
+        let session = terminal ? terminalSession(in: window, focused: focused) : nil
+        let windowTitle = window.flatMap { attribute(kAXTitleAttribute, of: $0) as? String }
+            .flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        let documentPath = window.flatMap { attribute(kAXDocumentAttribute, of: $0) as? String }
+            .flatMap { raw -> String? in
+                if let url = URL(string: raw), url.isFileURL { return url.lastPathComponent }
+                return (raw as NSString).lastPathComponent
+            }
+        let surroundingText = extractContextSnippet(from: session ?? focused)
         return FocusSnapshot(element: focused, window: window,
-                             terminalSession: terminal ? terminalSession(in: window, focused: focused) : nil)
+                             terminalSession: session,
+                             windowTitle: windowTitle,
+                             documentPath: documentPath,
+                             surroundingText: surroundingText)
+    }
+
+    /// Reads a compact snippet around the cursor (or the tail of the focused editor) so AI polishing
+    /// knows function names, variable identifiers, and domain terms visible where the user is dictating.
+    nonisolated private static func extractContextSnippet(from element: AXUIElement?) -> String? {
+        guard let element else { return nil }
+        let role = attribute(kAXRoleAttribute, of: element) as? String ?? ""
+        if role == "AXSecureTextField" { return nil }
+        guard let value = attribute(kAXValueAttribute, of: element) as? String,
+              !value.isEmpty else { return nil }
+        let nsValue = value as NSString
+        let maxRadius = 600
+        if let rawRange = attribute(kAXSelectedTextRangeAttribute, of: element),
+           CFGetTypeID(rawRange) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(rawRange as! AXValue, .cfRange, &range),
+               range.location >= 0, range.location <= nsValue.length {
+                let start = max(0, range.location - maxRadius)
+                let end = min(nsValue.length, range.location + max(0, range.length) + maxRadius)
+                if end > start {
+                    let slice = nsValue.substring(with: NSRange(location: start, length: end - start))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    return slice.isEmpty ? nil : slice
+                }
+            }
+        }
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        if cleaned.count <= maxRadius * 2 { return cleaned }
+        return String(cleaned.suffix(maxRadius * 2))
     }
 
     static func capture(application: NSRunningApplication?) -> TextInsertionTarget? {
@@ -71,7 +123,9 @@ enum TextInserter {
         let snapshot = captureFocus(pid: application.processIdentifier,
                                     terminal: application.bundleIdentifier == "com.apple.Terminal")
         return TextInsertionTarget(application: application, element: snapshot.element,
-                                   window: snapshot.window, terminalSession: snapshot.terminalSession)
+                                   window: snapshot.window, terminalSession: snapshot.terminalSession,
+                                   windowTitle: snapshot.windowTitle, documentPath: snapshot.documentPath,
+                                   surroundingText: snapshot.surroundingText)
     }
 
     static func insert(_ text: String, into target: TextInsertionTarget?,
@@ -80,8 +134,8 @@ enum TextInserter {
         guard !text.isEmpty, let target, !target.application.isTerminated,
               target.application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return .noTarget }
         guard AXIsProcessTrusted() else {
-            if !UserDefaults.standard.bool(forKey: "accessibilityPromptShown") {
-                UserDefaults.standard.set(true, forKey: "accessibilityPromptShown")
+            if !accessibilityPromptedThisLaunch {
+                accessibilityPromptedThisLaunch = true
                 AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
             }
             return .permissionRequired
@@ -214,31 +268,54 @@ enum TextInserter {
         do {
             repeat {
                 try await Task.sleep(nanoseconds: 50_000_000)
-                let after = element.flatMap { attribute(kAXValueAttribute, of: $0) as? String }
+                let liveElement = focusedElement(of: app, pid: target.application.processIdentifier) ?? element
+                let after = liveElement.flatMap { attribute(kAXValueAttribute, of: $0) as? String }
+                    ?? element.flatMap { attribute(kAXValueAttribute, of: $0) as? String }
                 if TextInsertionVerification.confirmed(text: text, before: before, after: after,
                                                         selection: range, terminal: terminal) { return .inserted }
-                // No initial value means readback cannot prove insertion. Do not
-                // keep polling a control that provides no usable verification.
-                if before == nil { break }
+                let afterRange = terminal ? nil : (liveElement.flatMap { selectedRange(of: $0) } ?? element.flatMap { selectedRange(of: $0) })
+                if !terminal, TextInsertionVerification.confirmedBySelectionChange(
+                    beforeRange: range, afterRange: afterRange) {
+                    return .inserted
+                }
+                // No initial value and no initial selection means readback cannot prove insertion.
+                // Do not keep polling a control that provides no usable verification.
+                if before == nil && range == nil { break }
             } while ProcessInfo.processInfo.systemUptime < deadline
         } catch { return .cancelled }
         // Interactive TUIs and no-echo prompts may not expose their input via AX.
         // Report delivery separately from an insertion verified by reading text.
-        let focusRetained = focusMatches(element, app: app, target: target, terminal: terminal)
+        let focusRetained = focusMatches(element, app: app, target: target, terminal: terminal, afterPaste: true)
         if !focusRetained { logger.notice("Paste unconfirmed: focus changed after paste") }
         return TextInsertionVerification.deliveryResult(terminal: terminal, focusRetained: focusRetained)
     }
 
     private static func focusMatches(_ element: AXUIElement?, app: AXUIElement,
-                                     target: TextInsertionTarget, terminal: Bool) -> Bool {
+                                     target: TextInsertionTarget, terminal: Bool,
+                                     afterPaste: Bool = false) -> Bool {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.application.processIdentifier else { return false }
         let window = elementAttribute(kAXFocusedWindowAttribute, of: app)
-        if let original = target.window, !same(original, window) { return false }
+        if let original = target.window, window != nil, !same(original, window) { return false }
         let focused = focusedElement(of: app, pid: target.application.processIdentifier)
         let current = terminal ? terminalSession(in: window, focused: focused) : focused
-        if let element { return same(element, current) }
+        if let element {
+            if same(element, current) { return true }
+            // Many editors (Electron/Web/IDE) replace the focused AX node on paste while keeping the cursor
+            // inside the same window and editable area. After Cmd+V was posted to the verified target,
+            // treat the window as retaining focus as long as focus did not jump to a non-text control.
+            if afterPaste {
+                let role = current.flatMap { attribute(kAXRoleAttribute, of: $0) as? String }
+                let editable = current.flatMap { attribute("AXEditable", of: $0) as? Bool } == true
+                var settable = DarwinBoolean(false)
+                if let current { AXUIElementIsAttributeSettable(current, kAXSelectedTextAttribute as CFString, &settable) }
+                return TextInsertionVerification.canAttemptPaste(
+                    role: role, selectedTextSettable: settable.boolValue, editable: editable,
+                    terminal: terminal, hasWindow: (window ?? target.window) != nil)
+            }
+            return false
+        }
         // With no AX input, the focused application/window is the destination.
-        return current == nil
+        return current == nil || afterPaste
     }
 
     nonisolated private static func focusedElement(of app: AXUIElement, pid: pid_t) -> AXUIElement? {

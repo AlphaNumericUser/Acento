@@ -39,7 +39,30 @@ nonisolated enum TextInsertionVerification {
         let needle = normalized(text)
         guard !needle.isEmpty else { return false }
         // A transcript already present in scrollback is not proof of a new paste.
-        return normalized(after).components(separatedBy: needle).count
-            > normalized(before).components(separatedBy: needle).count
+        if normalized(after).components(separatedBy: needle).count
+            > normalized(before).components(separatedBy: needle).count {
+            return true
+        }
+        // Rich editors and IDEs often convert regular spaces to non-breaking spaces, smart quotes,
+        // or auto-indent pasted lines; compare with collapsed whitespace as well.
+        func collapsed(_ value: String) -> String {
+            value.replacingOccurrences(of: "\u{00A0}", with: " ")
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+        let collapsedNeedle = collapsed(text)
+        guard !collapsedNeedle.isEmpty else { return false }
+        return collapsed(after).components(separatedBy: collapsedNeedle).count
+            > collapsed(before).components(separatedBy: collapsedNeedle).count
+    }
+
+    /// Confirms insertion when an editor does not expose updated AXValue text
+    /// but advances the cursor selection after Cmd+V inside the same editable field.
+    static func confirmedBySelectionChange(beforeRange: CFRange?, afterRange: CFRange?) -> Bool {
+        guard let beforeRange, let afterRange, beforeRange.location >= 0, afterRange.location >= 0 else { return false }
+        if afterRange.location > beforeRange.location { return true }
+        if beforeRange.length > 0 && afterRange.length == 0 && afterRange.location >= beforeRange.location { return true }
+        return false
     }
 }

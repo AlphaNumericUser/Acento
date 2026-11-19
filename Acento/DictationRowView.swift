@@ -30,8 +30,7 @@ struct CardPrimaryButton: View {
                 .background(muted ? Color.hoverBackground : Color.inkPrimary, in: RoundedRectangle(cornerRadius: 7))
                 .contentShape(RoundedRectangle(cornerRadius: 7))
         }
-        .buttonStyle(.plain)
-        .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+        .buttonStyle(FlowButtonStyle())
     }
 }
 
@@ -104,11 +103,11 @@ struct HoverIconButton: View {
                 .opacity(enabled ? 1 : 0.35)
                 .background(hovering && enabled ? Color.hoverBackground : .clear, in: RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
+                .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.16), value: hovering)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FlowButtonStyle(enabled: enabled, pressScale: 0.94))
         .onHover {
             hovering = $0
-            ($0 && enabled ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
         .onDisappear {
             if hovering {

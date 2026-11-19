@@ -108,17 +108,31 @@ final class DictationController: NSObject, ObservableObject {
         }
     }
     @Published private(set) var phase: DictationPhase = .idle {
-        didSet { updateEscapeHotkey() }
+        didSet {
+            guard phase != oldValue else { return }
+            updateEscapeHotkey()
+            refreshBarVisibility()
+        }
     }
     @Published private(set) var isHandsFree = false
     @Published var barExpanded = false
     let audioMeter = DictationMeter()
-    @Published private(set) var cancellationVisible = false
+    @Published private(set) var cancellationVisible = false {
+        didSet {
+            guard cancellationVisible != oldValue else { return }
+            refreshBarVisibility()
+        }
+    }
     @Published private(set) var canUndoCancellation = false
     @Published var message: String?
     @Published var shortcutStatus: String?
     /// Brief status shown in the floating bar after a dictation, such as a missing connection.
-    @Published private(set) var notice: BarNotice?
+    @Published private(set) var notice: BarNotice? {
+        didSet {
+            guard notice != oldValue else { return }
+            refreshBarVisibility()
+        }
+    }
     /// The current recording uses an API model offline with no local fallback, so it will only be saved.
     @Published var recordingOffline = false
     private var noticeTask: Task<Void, Never>?
@@ -237,6 +251,9 @@ final class DictationController: NSObject, ObservableObject {
                 defaults.set(true, forKey: "rightCommandAccessPrompted")
                 _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
             }
+        } else if AXIsProcessTrusted() {
+            // If a future app update invalidates the binary signature in TCC, allow prompting again.
+            defaults.set(false, forKey: "rightCommandAccessPrompted")
         }
         installObservers()
         refreshBarVisibility()
@@ -643,8 +660,8 @@ final class DictationController: NSObject, ObservableObject {
                 message = nil
                 if cancelled { playSound(.cancel) }
             }
-            resetCaptureState()
             if cancelled && wasPreparing { showCancellation() }
+            resetCaptureState()
             return
         }
         isRecording = false
@@ -661,12 +678,12 @@ final class DictationController: NSObject, ObservableObject {
         let model = recordingModel
         recordingModel = nil
         isHandsFree = false
-        phase = cancelled ? .idle : .transcribing
         let currentOperation = operationID
         if cancelled {
             operationID = UUID()
             showCancellation()
         }
+        phase = cancelled ? .idle : .transcribing
         let cancelledID = cancellationID
         playSound(cancelled ? .cancel : .stop)
         message = nil
@@ -823,15 +840,28 @@ final class DictationController: NSObject, ObservableObject {
         sounds.play(url, volume: cue == .cancel ? 0.55 : 0.8)
     }
 
+    private var showsIdleBar: Bool {
+        UserDefaults.standard.object(forKey: "showBar") as? Bool ?? true
+    }
+
+    private var shouldShowBar: Bool {
+        showsIdleBar || phase != .idle || cancellationVisible || notice != nil
+    }
+
     func refreshBarVisibility() {
-        guard UserDefaults.standard.object(forKey: "showBar") as? Bool ?? true else {
+        guard shouldShowBar else {
             barExpanded = false
             panel?.orderOut(nil)
             barPositioner?.stop()
             return
         }
-        if panel == nil { showBar() }
-        else { positionBar(); panel?.orderFrontRegardless(); barPositioner?.start() }
+        if panel == nil {
+            showBar()
+        } else {
+            barPositioner?.start()
+            positionBar()
+            panel?.orderFrontRegardless()
+        }
     }
 
     private func resetCaptureState() {
@@ -900,7 +930,7 @@ final class DictationController: NSObject, ObservableObject {
     }
 
     private func restoreBarOrder() {
-        guard UserDefaults.standard.object(forKey: "showBar") as? Bool ?? true else { return }
+        guard shouldShowBar else { return }
         if panel?.isVisible == false { panel?.orderFrontRegardless() }
         barPositioner?.start()
     }

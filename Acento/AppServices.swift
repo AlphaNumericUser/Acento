@@ -15,12 +15,19 @@ final class AppServices {
     private let defaults: UserDefaults
     private var started = false
     private var preferencesObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
+    private var appleIdleReleaseTask: Task<Void, Never>?
+    private var speechXPCHealPending = false
     private var showBar = true
     private var showDock = true
     private var transcribingPending = false
     /// Status text that only describes an outage; cleared as soon as the connection returns.
     private var offlineStatusMessage: String?
     private static let logger = Logger(subsystem: "com.useacento.acento", category: "Pipeline")
+    private static let lastSpeechXPCHealKey = "lastSpeechXPCHealTimestamp"
+    private static let appleIdleReleaseDelay: UInt64 = 90_000_000_000
+    private static let speechXPCHealCooldown: TimeInterval = 600
 
     init(defaults: UserDefaults = .standard) {
         AppLanguage.migrate()
@@ -48,6 +55,8 @@ final class AppServices {
         }
         recorder.onWillRecord = { [weak self] selected in
             guard let self else { return }
+            self.appleIdleReleaseTask?.cancel()
+            self.appleIdleReleaseTask = nil
             self.recorder.recordingOffline = !selected.isLocal && !NetworkMonitor.shared.isOnline
                 && self.modelStore.offlineFallback == nil
             var origins = [ConnectionWarmer.origin(for: selected)].compactMap { $0 }
@@ -82,6 +91,75 @@ final class AppServices {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshPreferences() }
         }
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleSystemWillSleep() }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleSystemDidWake() }
+        }
+    }
+
+    private func handleSystemWillSleep() {
+        appleIdleReleaseTask?.cancel()
+        appleIdleReleaseTask = nil
+        guard !recorder.isRecording else { return }
+        // Drop lingering SpeechAnalyzer models before macOS sleeps so its XPC send port
+        // is not left stale when localspeechrecognition exits overnight.
+        Task { await AppleSpeechAssets.resetCachedModels() }
+    }
+
+    private func handleSystemDidWake() {
+        Task { @MainActor [weak self] in
+            await AppleSpeechAssets.resetCachedModels()
+            self?.modelStore.refreshAfterWake()
+        }
+    }
+
+    private func scheduleAppleIdleRelease() {
+        appleIdleReleaseTask?.cancel()
+        appleIdleReleaseTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.appleIdleReleaseDelay)
+            guard !Task.isCancelled, let self,
+                  self.recorder.phase == .idle, !self.recorder.isRecording else { return }
+            await AppleSpeechAssets.resetCachedModels()
+        }
+    }
+
+    /// If Speech.framework enters a stale XPC 4099 state where `AssetInventory.status` stays
+    /// unavailable even after `install()`, relaunches silently once idle with no main window open.
+    private func scheduleSpeechXPCHealIfIdle() {
+        guard !speechXPCHealPending else { return }
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let now = Date().timeIntervalSince1970
+        let lastHeal = defaults.double(forKey: Self.lastSpeechXPCHealKey)
+        guard now - lastHeal >= Self.speechXPCHealCooldown else { return }
+        speechXPCHealPending = true
+        Task { @MainActor [weak self] in
+            // Wait until pasting/notifications settle and the app is completely idle.
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard let self else { return }
+            defer { self.speechXPCHealPending = false }
+            guard self.recorder.phase == .idle, !self.recorder.isRecording else { return }
+            let hasVisibleMainWindow = NSApp.windows.contains { $0.isVisible && $0.canBecomeMain }
+            guard !hasVisibleMainWindow else {
+                Self.logger.notice("Skipping Speech XPC self-heal relaunch because main window is visible")
+                return
+            }
+            self.defaults.set(Date().timeIntervalSince1970, forKey: Self.lastSpeechXPCHealKey)
+            Self.logger.notice("Relaunching Acento silently to recover stale Speech.framework XPC connection")
+            let bundlePath = Bundle.main.bundleURL.path
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = ["-n", bundlePath]
+            if (try? process.run()) != nil {
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     func showMainWindow() {
@@ -102,26 +180,52 @@ final class AppServices {
         }
     }
 
-    /// Uses the live transcript when it is available; otherwise transcribes the saved recording.
+    /// Uses the live transcript when it is complete; if live recognition dropped earlier segments
+    /// or failed, resets the lingering in-process model and transcribes the saved recording.
     private func transcribe(_ url: URL, using selected: SpeechModel, live: AppleLiveTranscription?) async throws -> String {
+        var partialLive: AppleTranscript?
         if let live {
             do {
-                let text = try await withTaskCancellationHandler { try await live.finish() } onCancel: { live.cancel() }
-                if !text.isEmpty { return text }
-                Self.logger.notice("Live transcription returned no text; transcribing the recording")
+                let transcript = try await withTaskCancellationHandler { try await live.finish() } onCancel: { live.cancel() }
+                if transcript.isComplete { return transcript.text }
+                if !transcript.text.isEmpty {
+                    partialLive = transcript
+                    Self.logger.notice("Live transcription covered \(transcript.coveredSeconds, privacy: .public)s of \(transcript.audioSeconds, privacy: .public)s; re-transcribing recording")
+                } else {
+                    Self.logger.notice("Live transcription returned no text; transcribing the recording")
+                }
+                await AppleSpeechAssets.resetCachedModels()
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 try Task.checkCancellation()
                 Self.logger.error("Live transcription failed: \(error.localizedDescription, privacy: .public)")
+                await AppleSpeechAssets.resetCachedModels()
             }
         }
-        return try await modelStore.transcribe(url, using: selected)
+        let skipAppleReserve = live?.didFailReservation == true
+        if skipAppleReserve {
+            Self.logger.error("Apple Speech AssetInventory remained unavailable after install; scheduling silent XPC recovery")
+            scheduleSpeechXPCHealIfIdle()
+        }
+        do {
+            let fileText = try await modelStore.transcribe(url, using: selected, skipAppleReserve: skipAppleReserve)
+            if let partialLive, partialLive.text.count > fileText.count {
+                return partialLive.text
+            }
+            return fileText
+        } catch {
+            if let partialLive, !partialLive.text.isEmpty { return partialLive.text }
+            throw error
+        }
     }
 
     private func finishRecording(_ url: URL, target: TextInsertionTarget?, selected: SpeechModel,
                                  live: AppleLiveTranscription?) async {
         guard !Task.isCancelled else { live?.cancel(); return }
+        defer {
+            if selected == .apple { scheduleAppleIdleRelease() }
+        }
         let clock = ContinuousClock()
         let started = clock.now
         func elapsed(_ since: ContinuousClock.Instant) -> Int {
@@ -156,7 +260,16 @@ final class AppServices {
                     recorder.markPolishing()
                     recorder.message = L10n.text("Improving text with AI…")
                     do {
-                        output = try await processor.process(output, applicationName: target?.localizedName, dictionaryTerms: model.terms)
+                        let recent = model.history.prefix(2).map(\.text).filter { !$0.isEmpty }
+                        let aiContext = AIDictationContext(
+                            applicationName: target?.localizedName,
+                            windowTitle: target?.windowTitle,
+                            documentPath: target?.documentPath,
+                            surroundingText: target?.surroundingText,
+                            recentDictations: Array(recent)
+                        )
+                        output = try await processor.process(output, applicationName: target?.localizedName,
+                                                             dictionaryTerms: model.terms, context: aiContext)
                     } catch {
                         try Task.checkCancellation()
                         if NetworkMonitor.shared.isOfflineError(error) { skippedOffline = true }
@@ -170,16 +283,17 @@ final class AppServices {
             let polished = elapsed(polishStart)
             try Task.checkCancellation()
             recorder.retainRecording()
+            let pastedText = (output.isEmpty || output.hasSuffix(" ") || output.hasSuffix("\n")) ? output : output + " "
             let insertStart = clock.now
             var delivered = false
             let result: TextInsertionResult
-            if target == nil, recorder.insertIntoOwnTextField(output) {
+            if target == nil, recorder.insertIntoOwnTextField(pastedText) {
                 result = .inserted
                 delivered = true
                 recorder.markDelivered()
                 recorder.playSound(.paste)
             } else {
-                result = await TextInserter.insert(output, into: target) { [weak self] in
+                result = await TextInserter.insert(pastedText, into: target) { [weak self] in
                     delivered = true
                     self?.recorder.markDelivered()
                     self?.recorder.playSound(.paste)
@@ -197,7 +311,7 @@ final class AppServices {
             } else {
                 // The recovery window already explains what happened; no status text needed.
                 recorder.message = nil
-                recorder.showRecovery(text: output, target: target, result: result)
+                recorder.showRecovery(text: pastedText, target: target, result: result)
                 recorder.playSound(.alert)
             }
             if warning == nil, let fallback { warning = L10n.format("No connection · used %@", fallback.title) }

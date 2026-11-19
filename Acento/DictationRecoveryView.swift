@@ -4,6 +4,12 @@ import SwiftUI
 final class DictationRecoveryPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask,
+                  backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: bufferingType, defer: flag)
+        acceptsMouseMovedEvents = true
+    }
 }
 
 struct DictationRecoveryView: View {
@@ -18,8 +24,11 @@ struct DictationRecoveryView: View {
     @State private var result: TextInsertionResult?
     @State private var retrying = false
     @State private var copied = false
+    @State private var copyHovered = false
+    @State private var closeHovered = false
     @State private var retryTask: Task<Void, Never>?
     @State private var visible = false
+    @State private var contentVisible = false
     @State private var dismissing = false
     @State private var remainingSeconds = 10.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -46,10 +55,15 @@ struct DictationRecoveryView: View {
         guard !dismissing else { return }
         dismissing = true
         retryTask?.cancel()
-        let duration = reduceMotion ? 0 : (gently ? 0.22 : 0.06)
-        withAnimation(gently ? .timingCurve(0.4, 0, 0.2, 1, duration: duration) : .easeIn(duration: duration)) { visible = false }
-        if gently, let panel = NSApp.windows.first(where: { $0 is DictationRecoveryPanel && $0.isVisible }) {
-            // Fade the window too, so its shadow leaves with the content.
+        let duration = reduceMotion ? 0 : (gently ? 0.24 : 0.18)
+        withAnimation(reduceMotion ? nil : .timingCurve(0.32, 0, 0.15, 1, duration: duration * 0.75)) {
+            contentVisible = false
+        }
+        withAnimation(reduceMotion ? nil : .timingCurve(0.22, 1, 0.36, 1, duration: duration)) {
+            visible = false
+        }
+        if duration > 0, let panel = NSApp.windows.first(where: { $0 is DictationRecoveryPanel && $0.isVisible }) {
+            // Fade the window too, so its shadow leaves smoothly with the content.
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = duration
                 panel.animator().alphaValue = 0
@@ -85,11 +99,17 @@ struct DictationRecoveryView: View {
                     .contentTransition(.opacity)
             }
             .font(AppFonts.figtree(size: 14, weight: .medium))
-            .foregroundStyle(copied ? Color.black : Color(white: 0.93))
+            .foregroundStyle(copied ? Color.black : Color(white: 0.95))
             .padding(.horizontal, 13)
             .frame(height: 32)
-            .background(copied ? Color(white: 0.93) : Color(white: 0.32), in: RoundedRectangle(cornerRadius: 9))
+            .background(
+                copied ? Color(white: 0.93) : Color(white: copyHovered ? 0.40 : 0.32),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .animation(reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.18), value: copyHovered)
         }
+        .onHover { copyHovered = $0 }
     }
 
     private var actionRow: some View {
@@ -102,23 +122,20 @@ struct DictationRecoveryView: View {
                 } label: {
                     Text(L10n.text(action.label, locale: Locale(identifier: language)))
                         .font(AppFonts.figtree(size: 14, weight: .medium))
-                        .foregroundStyle(Color(white: 0.93))
+                        .foregroundStyle(Color(white: 0.95))
                         .padding(.horizontal, 13)
                         .frame(height: 32)
-                        .background(Color(white: 0.32), in: RoundedRectangle(cornerRadius: 9))
+                        .background(Color(white: copyHovered ? 0.40 : 0.32), in: RoundedRectangle(cornerRadius: 9))
+                        .contentShape(RoundedRectangle(cornerRadius: 9))
+                        .animation(reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.18), value: copyHovered)
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.plain)
-                .onHover { inside in
-                    (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-                }
+                .buttonStyle(FlowButtonStyle())
+                .onHover { copyHovered = $0 }
             } else {
                 copyButton
                     .keyboardShortcut("c", modifiers: [.command, .shift])
-                    .buttonStyle(.plain)
-                    .onHover { inside in
-                        (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-                    }
+                    .buttonStyle(FlowButtonStyle())
                     .contextMenu {
                         Button(LocalizedStringKey(retrying ? "Inserting…" : "Retry insertion")) {
                             retrying = true
@@ -134,10 +151,15 @@ struct DictationRecoveryView: View {
     }
 
     private func runCountdown() async {
-        withAnimation(reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.14)) { visible = true }
+        withAnimation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.78, blendDuration: 0)) {
+            visible = true
+        }
+        withAnimation(reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.26).delay(0.04)) {
+            contentVisible = true
+        }
         var lastTick = ProcessInfo.processInfo.systemUptime
         while remainingSeconds > 0 && !dismissing {
-            do { try await Task.sleep(nanoseconds: 50_000_000) }
+            do { try await Task.sleep(nanoseconds: 16_000_000) }
             catch { return }
             guard !Task.isCancelled else { return }
             let now = ProcessInfo.processInfo.systemUptime
@@ -146,44 +168,49 @@ struct DictationRecoveryView: View {
             if !paused { remainingSeconds = max(0, remainingSeconds - (now - lastTick)) }
             lastTick = now
         }
-        if !dismissing { dismiss() }
+        if !dismissing { dismiss(gently: true) }
     }
 
     var body: some View {
         let size = Self.size(for: text)
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 17, weight: .medium))
+                Image("AcentoTilde")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 21, height: 11)
                     .foregroundStyle(.white)
+                    .accessibilityHidden(true)
                 Spacer()
                 Text(L10n.text(instruction, locale: Locale(identifier: language)))
                     .font(AppFonts.figtree(size: 12))
                     .foregroundStyle(Color(white: 0.4))
                     .lineLimit(1)
                     .help(L10n.text(instruction, locale: Locale(identifier: language)))
-                Button { dismiss() } label: {
+                Button { dismiss(gently: true) } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(.white.opacity(closeHovered ? 1 : 0.9))
                         .frame(width: 26, height: 26)
-                        .background(Color(white: 0.025), in: Circle())
-                        .overlay(Circle().strokeBorder(Color(white: 0.14), lineWidth: 1))
+                        .background(Color(white: closeHovered ? 0.16 : 0.025), in: Circle())
+                        .overlay(Circle().strokeBorder(Color(white: closeHovered ? 0.26 : 0.14), lineWidth: 1))
+                        .scaleEffect(closeHovered && !reduceMotion ? 1.06 : 1)
+                        .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.72), value: closeHovered)
                         .overlay {
                             Circle()
                                 .trim(from: 0, to: CGFloat(1 - remainingSeconds / 10))
-                                .stroke(.white.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                                .stroke(.white.opacity(0.82), style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
                                 .rotationEffect(.degrees(-90))
                                 .scaleEffect(x: -1, y: 1)
-                                .animation(reduceMotion ? nil : .linear(duration: 0.05), value: remainingSeconds)
+                                .animation(reduceMotion ? nil : .linear(duration: 0.02), value: remainingSeconds)
                                 .allowsHitTesting(false)
                         }
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .onHover { inside in
-                    (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-                }
+                .pointerCursor()
+                .onHover { closeHovered = $0 }
                 .help(L10n.text("Close", locale: Locale(identifier: language)))
                 .accessibilityLabel(L10n.text("Close", locale: Locale(identifier: language)))
                 .accessibilityValue(L10n.format("Closes in %ld seconds", locale: Locale(identifier: language), Int(ceil(remainingSeconds))))
@@ -201,6 +228,8 @@ struct DictationRecoveryView: View {
             actionRow
             .frame(height: 32)
         }
+        .opacity(reduceMotion || contentVisible ? 1 : 0)
+        .offset(y: reduceMotion || contentVisible ? 0 : 4)
         .padding(.horizontal, 16)
         .padding(.top, 16)
         .padding(.bottom, 16)
@@ -208,8 +237,12 @@ struct DictationRecoveryView: View {
         .background(.black, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color(white: 0.16), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 20))
-        .scaleEffect(reduceMotion || visible ? 1 : 0.9, anchor: .bottom)
-        .offset(y: reduceMotion || visible ? 0 : 6)
+        .scaleEffect(
+            x: reduceMotion || visible ? 1 : (dismissing ? 0.72 : 0.42),
+            y: reduceMotion || visible ? 1 : (dismissing ? 0.56 : 0.32),
+            anchor: .bottom
+        )
+        .offset(y: reduceMotion || visible ? 0 : 12)
         .opacity(visible ? 1 : 0)
         .environment(\.locale, Locale(identifier: language))
         .environment(\.colorScheme, .dark)

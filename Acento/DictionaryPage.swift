@@ -35,13 +35,15 @@ struct DictionaryPage: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    Button("Add new") { openEditor(nil) }
-                        .buttonStyle(.plain)
-                        .font(AppFonts.figtree(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.onAccent)
-                        .padding(.horizontal, 18).padding(.vertical, 11)
-                        .background(Color.inkPrimary, in: RoundedRectangle(cornerRadius: 9))
-                        .onHover { ($0 ? NSCursor.pointingHand : NSCursor.arrow).set() }
+                    Button { openEditor(nil) } label: {
+                        Text("Add new")
+                            .font(AppFonts.figtree(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.onAccent)
+                            .padding(.horizontal, 18).padding(.vertical, 11)
+                            .background(Color.inkPrimary, in: RoundedRectangle(cornerRadius: 9))
+                            .contentShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(FlowButtonStyle())
                 }
                 .padding(.bottom, 14)
 
@@ -107,8 +109,7 @@ struct DictionaryPage: View {
                 HStack {
                     Spacer()
                     Button("Cancel") { editing = false }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                        .buttonStyle(FlowButtonStyle())
                     Button {
                         let term = DictionaryTerm(id: editingID ?? UUID(), spoken: spoken.trimmingCharacters(in: .whitespacesAndNewlines), written: written.trimmingCharacters(in: .whitespacesAndNewlines), mode: mode)
                         if let index = model.terms.firstIndex(where: { $0.id == term.id }) {
@@ -126,10 +127,9 @@ struct DictionaryPage: View {
                             .background(canSaveTerm ? Color.inkPrimary : Color.disabledBackground, in: RoundedRectangle(cornerRadius: 8))
                             .contentShape(RoundedRectangle(cornerRadius: 8))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(FlowButtonStyle(enabled: canSaveTerm))
                     .disabled(!canSaveTerm)
                     .keyboardShortcut(.defaultAction)
-                    .pointerCursor(canSaveTerm)
                 }
             }
             .padding(28).frame(width: 440)

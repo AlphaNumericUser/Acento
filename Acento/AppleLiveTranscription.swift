@@ -1,6 +1,57 @@
 @preconcurrency import AVFoundation
 import Speech
 
+/// Final text from SpeechAnalyzer together with how much of the audio its results cover.
+/// A lingering in-process model has been seen returning only the last segment of a long
+/// recording (e.g. 20–28 s of a 28 s dictation); coverage makes that detectable.
+nonisolated struct AppleTranscript: Sendable, Equatable {
+    var text: String
+    /// Sum of the final results' audio ranges, in seconds.
+    var coveredSeconds: Double
+    /// Start of the earliest final result, in seconds; nil without results.
+    var firstStart: Double?
+    /// Length of the analyzed audio, in seconds.
+    var audioSeconds: Double
+
+    static let empty = AppleTranscript(text: "", coveredSeconds: 0, firstStart: nil, audioSeconds: 0)
+
+    /// Results normally tile the whole recording (0–9.5, 9.5–20.3, 20.3–28.4 s). A transcript is
+    /// suspicious when its results skip the beginning or leave most of a long recording uncovered.
+    var isComplete: Bool {
+        guard !text.isEmpty else { return false }
+        guard audioSeconds >= 4 else { return true }
+        if let firstStart, firstStart > max(3, audioSeconds * 0.25) { return false }
+        return coveredSeconds >= audioSeconds * 0.6
+    }
+
+    /// Prefers complete transcripts, then the one covering more audio, then the longer text.
+    func isBetter(than other: AppleTranscript) -> Bool {
+        if isComplete != other.isComplete { return isComplete }
+        if abs(coveredSeconds - other.coveredSeconds) > 0.5 { return coveredSeconds > other.coveredSeconds }
+        return text.count > other.text.count
+    }
+}
+
+/// Accumulates final SpeechTranscriber results and their time ranges.
+nonisolated struct AppleTranscriptCollector {
+    private(set) var text = ""
+    private(set) var covered = 0.0
+    private(set) var firstStart: Double?
+
+    mutating func add(text piece: String, start: Double, duration: Double) {
+        text += piece
+        if start.isFinite, duration.isFinite, duration > 0 {
+            covered += duration
+            firstStart = min(firstStart ?? start, start)
+        }
+    }
+
+    func transcript(audioSeconds: Double) -> AppleTranscript {
+        AppleTranscript(text: text.trimmingCharacters(in: .whitespacesAndNewlines), coveredSeconds: covered,
+                        firstStart: firstStart, audioSeconds: audioSeconds)
+    }
+}
+
 /// Streams microphone audio into Apple's on-device SpeechAnalyzer while the user speaks,
 /// so releasing the shortcut only has to finalize the last moment of speech.
 /// The WAV recording is still written in parallel and remains the fallback.
@@ -9,18 +60,52 @@ nonisolated final class AppleLiveTranscription: @unchecked Sendable {
     static let microphoneFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
 
     private let continuation: AsyncStream<AnalyzerInput>.Continuation
-    private let setup: Task<(SpeechAnalyzer, Task<String, Error>), Error>
+    private let setup: Task<(SpeechAnalyzer, Task<AppleTranscriptCollector, Error>), Error>
+    private final class AtomicFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
 
-    init(locale: Locale = .current) {
+        var isSet: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+
+        func set() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+    }
+
+    private let lock = NSLock()
+    private var appendedSeconds = 0.0 // guarded by lock; written on the audio queue
+    private let reservationUnavailableFlag: AtomicFlag
+
+    /// True when the Apple model is on disk, an install/reservation attempt finished,
+    /// yet AssetInventory still did not report `.installed` (signature of a stale XPC 4099 state).
+    var didFailReservation: Bool { reservationUnavailableFlag.isSet }
+
+    init(locale: Locale = .current, autoReserve: Bool = true) {
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         self.continuation = continuation
+        let unavailableFlag = AtomicFlag()
+        self.reservationUnavailableFlag = unavailableFlag
         setup = Task(priority: .userInitiated) {
             guard SpeechTranscriber.isAvailable,
                   let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
                 throw SpeechFailure("Live Apple transcription is unavailable for your Mac language.")
             }
             let transcriber = SpeechTranscriber(locale: supported, preset: .transcription)
-            guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
+            var status = await AssetInventory.status(forModules: [transcriber])
+            if status != .installed, autoReserve, AppleSpeechAssets.isOnDisk(supported) {
+                try? await AppleSpeechAssets.install(locale: supported) { _ in }
+                status = await AssetInventory.status(forModules: [transcriber])
+                if status != .installed {
+                    unavailableFlag.set()
+                }
+            }
+            guard status == .installed else {
                 throw SpeechFailure("Download the Apple speech model in Models before recording.")
             }
             let analyzer = SpeechAnalyzer(modules: [transcriber],
@@ -29,11 +114,12 @@ nonisolated final class AppleLiveTranscription: @unchecked Sendable {
                                                                        considering: Self.microphoneFormat) ?? Self.microphoneFormat
             try await analyzer.prepareToAnalyze(in: format)
             let collector = Task {
-                var text = ""
+                var collected = AppleTranscriptCollector()
                 for try await result in transcriber.results where result.isFinal {
-                    text += String(result.text.characters)
+                    collected.add(text: String(result.text.characters),
+                                  start: result.range.start.seconds, duration: result.range.duration.seconds)
                 }
-                return text
+                return collected
             }
             let converter = BufferConverter(target: format)
             try await analyzer.start(inputSequence: stream.compactMap { converter.convert($0) })
@@ -50,17 +136,30 @@ nonisolated final class AppleLiveTranscription: @unchecked Sendable {
         buffer.frameLength = frames
         guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sampleBuffer, at: 0, frameCount: Int32(frames),
                                                            into: buffer.mutableAudioBufferList) == noErr else { return }
+        lock.lock()
+        if format.sampleRate > 0 { appendedSeconds += Double(frames) / format.sampleRate }
+        lock.unlock()
         continuation.yield(AnalyzerInput(buffer: buffer))
     }
 
     /// Called on the audio queue after the last buffer, so no audio is lost.
     func finishInput() { continuation.finish() }
 
-    func finish() async throws -> String {
+    func finish() async throws -> AppleTranscript {
         continuation.finish()
         let (analyzer, collector) = try await setup.value
-        try await analyzer.finalizeAndFinishThroughEndOfInput()
-        return try await collector.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+        } catch {
+            // Never leave a half-finished analyzer holding the shared model.
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            throw error
+        }
+        lock.lock()
+        let seconds = appendedSeconds
+        lock.unlock()
+        return try await collector.value.transcript(audioSeconds: seconds)
     }
 
     func cancel() {
@@ -154,23 +253,67 @@ enum AppleSpeechAssets {
     }
 
     /// Transcribes a saved recording with SpeechAnalyzer (used for retries and as the live fallback).
+    /// If the result skips part of the audio, the cached in-process model is released (what quitting
+    /// the app used to fix) and the file is analyzed again with a freshly loaded model.
     static func transcribe(_ url: URL, locale: Locale = .current) async throws -> String {
+        try await transcript(url, locale: locale).text
+    }
+
+    static func transcript(_ url: URL, locale: Locale = .current) async throws -> AppleTranscript {
+        var best = AppleTranscript.empty
+        var lastError: Error?
+        for attempt in 0..<2 {
+            try Task.checkCancellation()
+            if attempt > 0 { await resetCachedModels() }
+            do {
+                let result = try await analyzeFile(url, locale: locale)
+                if result.isBetter(than: best) { best = result }
+                if result.isComplete { return result }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
+        }
+        if best.text.isEmpty, let lastError { throw lastError }
+        return best
+    }
+
+    /// Drops SpeechAnalyzer models cached in this process; the next analysis loads them again.
+    static func resetCachedModels() async {
+        await SpeechModels.endRetention()
+    }
+
+    private static func analyzeFile(_ url: URL, locale: Locale) async throws -> AppleTranscript {
         guard SpeechTranscriber.isAvailable,
               let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
             throw SpeechFailure("Live Apple transcription is unavailable for your Mac language.")
         }
         let transcriber = SpeechTranscriber(locale: supported, preset: .transcription)
         let file = try AVAudioFile(forReading: url)
+        let seconds = file.fileFormat.sampleRate > 0 ? Double(file.length) / file.fileFormat.sampleRate : 0
         let collector = Task {
-            var text = ""
+            var collected = AppleTranscriptCollector()
             for try await result in transcriber.results where result.isFinal {
-                text += String(result.text.characters)
+                collected.add(text: String(result.text.characters),
+                              start: result.range.start.seconds, duration: result.range.duration.seconds)
             }
-            return text
+            return collected
         }
-        let analyzer = try await SpeechAnalyzer(inputAudioFile: file, modules: [transcriber], finishAfterFile: true)
-        let text = try await collector.value
+        let analyzer: SpeechAnalyzer
+        do {
+            analyzer = try await SpeechAnalyzer(inputAudioFile: file, modules: [transcriber], finishAfterFile: true)
+        } catch {
+            collector.cancel()
+            throw error
+        }
+        let collected = try await withTaskCancellationHandler {
+            try await collector.value
+        } onCancel: {
+            collector.cancel()
+            Task { await analyzer.cancelAndFinishNow() }
+        }
         withExtendedLifetime(analyzer) {}
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return collected.transcript(audioSeconds: seconds)
     }
 }
